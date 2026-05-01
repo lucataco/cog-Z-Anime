@@ -1,7 +1,36 @@
 #!/usr/bin/env python3
+"""Optional helper to pre-warm a local checkpoints/ cache for development.
+
+In production, predict.py downloads weights via pget from
+https://weights.replicate.delivery/default/SeeSee21/Z-Anime/model.tar.
+
+Use this script only if you want to iterate locally without going through pget.
+It downloads the diffusers/ subtree from HuggingFace and swaps in the BF16
+text encoder for prompt fidelity.
+"""
+import os
+import shutil
+
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+
 from huggingface_hub import snapshot_download
+
+CACHE = "checkpoints"
+
 snapshot_download(
     repo_id="SeeSee21/Z-Anime",
-    local_dir="checkpoints",
+    local_dir=CACHE,
     allow_patterns=["diffusers/**"],
 )
+snapshot_download(
+    repo_id="SeeSee21/Z-Anime",
+    local_dir=CACHE,
+    allow_patterns=["text_encoder/qwen_3_4b-bf16.safetensors"],
+)
+
+bf16 = os.path.join(CACHE, "text_encoder/qwen_3_4b-bf16.safetensors")
+target = os.path.join(CACHE, "diffusers/text_encoder/model.safetensors")
+if os.path.exists(bf16):
+    print(f"Swapping BF16 text encoder into {target}")
+    shutil.copyfile(bf16, target)
+print("Done.")

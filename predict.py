@@ -4,20 +4,23 @@ from __future__ import annotations
 # https://cog.run/python
 
 import os
-import shutil
+import subprocess
 import time
 from pathlib import Path as FilePath
+
 import torch
 from cog import BasePredictor, Input, Path
 from diffusers import ZImagePipeline
-from huggingface_hub import snapshot_download
 
 MODEL_ID = "SeeSee21/Z-Anime"
 MODEL_CACHE = "checkpoints"
 SUBFOLDER = "diffusers"
-BF16_TEXT_ENCODER = "text_encoder/qwen_3_4b-bf16.safetensors"
-DEFAULT_NEGATIVE_PROMPT = "low quality, worst quality, blurry, extra fingers, bad anatomy, text, watermark"
+# Pre-built tarball: contains only `diffusers/` with the BF16 text encoder
+# already swapped in (~20 GB extracted). Avoids HF LFS bottlenecks during cold boot.
+WEIGHTS_URL = "https://weights.replicate.delivery/default/SeeSee21/Z-Anime/model.tar"
+DEFAULT_NEGATIVE_PROMPT = ""  # negative prompt is optional; leave blank by default
 
+# Recommended sizes from upstream model card.
 ASPECT_RATIOS: dict[str, tuple[int, int]] = {
     "square": (1024, 1024),
     "portrait": (832, 1216),
@@ -27,36 +30,30 @@ ASPECT_RATIOS: dict[str, tuple[int, int]] = {
 }
 
 
-def download_weights() -> None:
+def download_weights(url: str, dest: str) -> None:
     start = time.time()
-    print(f"Downloading {MODEL_ID}/{SUBFOLDER} to {MODEL_CACHE}")
-    snapshot_download(
-        repo_id=MODEL_ID,
-        local_dir=MODEL_CACHE,
-        allow_patterns=["diffusers/**", BF16_TEXT_ENCODER],
-    )
-    print(f"Download complete in {time.time() - start:.1f}s")
+    print(f"downloading url: {url}")
+    print(f"downloading to: {dest}")
+    subprocess.check_call(["pget", "-xf", url, dest], close_fds=False)
+    print(f"downloading took: {time.time() - start:.1f}s")
 
 
 class Predictor(BasePredictor):
     pipe: ZImagePipeline
 
     def setup(self) -> None:
-        if not os.path.exists(os.path.join(MODEL_CACHE, SUBFOLDER, "model_index.json")) or not os.path.exists(os.path.join(MODEL_CACHE, BF16_TEXT_ENCODER)):
-            download_weights()
-
-        bf16_text_encoder = os.path.join(MODEL_CACHE, BF16_TEXT_ENCODER)
-        diffusers_text_encoder = os.path.join(MODEL_CACHE, SUBFOLDER, "text_encoder", "model.safetensors")
-        if os.path.exists(bf16_text_encoder):
-            print("Using BF16 text encoder for prompt fidelity")
-            shutil.copyfile(bf16_text_encoder, diffusers_text_encoder)
+        diffusers_dir = os.path.join(MODEL_CACHE, SUBFOLDER)
+        if not os.path.exists(os.path.join(diffusers_dir, "model_index.json")):
+            download_weights(WEIGHTS_URL, MODEL_CACHE)
 
         start = time.time()
         print("Loading Z-Anime pipeline")
         self.pipe = ZImagePipeline.from_pretrained(
-            os.path.join(MODEL_CACHE, SUBFOLDER),
+            diffusers_dir,
             torch_dtype=torch.bfloat16,
         )
+        # CPU offload + VAE memory options keep the L40S worker stable
+        # (per upstream model card: 8GB VRAM target, ~14GB BF16 weights + 7.5GB BF16 TE).
         self.pipe.enable_model_cpu_offload()
         try:
             self.pipe.vae.enable_slicing()
@@ -70,15 +67,32 @@ class Predictor(BasePredictor):
         self,
         prompt: str = Input(
             description="Natural language description of the anime image to generate.",
-            default="A cinematic anime portrait of a young woman with silver hair and golden eyes, standing in a sunlit bamboo forest with cherry blossoms falling around her, detailed lighting, rich colors",
+            default=(
+                "A cinematic anime portrait of a young woman with silver hair and "
+                "golden eyes, standing in a sunlit bamboo forest with cherry blossoms "
+                "falling around her, detailed lighting, rich colors"
+            ),
         ),
         negative_prompt: str = Input(
-            description="Things to avoid in the image.",
-            default=DEFAULT_NEGATIVE_PROMPT,
+            description="Things to avoid in the image. Leave blank to disable.",
+            default="",
         ),
         aspect_ratio: str = Input(
-            description="Output aspect ratio: square, portrait, landscape, tall, or wide.",
+            description="Output aspect ratio.",
+            choices=list(ASPECT_RATIOS.keys()),
             default="portrait",
+        ),
+        num_inference_steps: int = Input(
+            description="Number of denoising steps. 28-50 recommended for Z-Anime Base.",
+            default=36,
+            ge=4,
+            le=80,
+        ),
+        guidance_scale: float = Input(
+            description="Classifier-free guidance scale. 3.0-5.0 is the sweet spot.",
+            default=4.0,
+            ge=1.0,
+            le=12.0,
         ),
         seed: int = Input(
             description="Random seed. Set to -1 for a random seed.",
@@ -87,21 +101,21 @@ class Predictor(BasePredictor):
             le=2147483647,
         ),
     ) -> Path:
-        aspect_ratio = aspect_ratio.lower().strip()
-        if aspect_ratio not in ASPECT_RATIOS:
-            raise ValueError(f"Invalid aspect_ratio '{aspect_ratio}'. Use one of: {', '.join(ASPECT_RATIOS)}")
         width, height = ASPECT_RATIOS[aspect_ratio]
         if seed < 0:
             seed = int.from_bytes(os.urandom(4), "big") % 2147483647
-        print(f"Generating {width}x{height} with seed {seed}")
+        print(
+            f"Generating {width}x{height}, steps={num_inference_steps}, "
+            f"cfg={guidance_scale}, seed={seed}"
+        )
         generator = torch.Generator(device="cuda").manual_seed(seed)
         image = self.pipe(
             prompt=prompt,
             negative_prompt=negative_prompt,
             width=width,
             height=height,
-            num_inference_steps=36,
-            guidance_scale=4.0,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
             generator=generator,
             max_sequence_length=512,
         ).images[0]
