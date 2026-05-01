@@ -1,0 +1,7 @@
+# Configuration for Cog ⚙️
+build:
+  gpu: true
+  cuda: "12.4"
+  python_version: "3.11"
+  python_requirements: requirements.txt
+predict: "predict.py:Predictor"

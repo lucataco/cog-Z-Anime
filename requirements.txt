@@ -1,0 +1,9 @@
+torch==2.6.0
+transformers==5.7.0
+git+https://github.com/huggingface/diffusers.git
+accelerate==1.13.0
+huggingface-hub>=1.13.0
+safetensors>=0.8.0rc0
+sentencepiece>=0.2.1
+protobuf>=6.33.0
+pillow>=11.0.0

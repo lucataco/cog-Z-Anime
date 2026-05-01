@@ -1,0 +1,6 @@
+checkpoints/
+.git/
+.env
+.env.*
+__pycache__/
+*.pyc
